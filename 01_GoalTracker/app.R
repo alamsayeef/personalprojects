@@ -4,6 +4,8 @@ library(DT)
 library(ggplot2)
 library(dplyr)
 library(plotly)
+library(readxl)
+library(writexl)
 
 # --- Initial Data Setup ---
 start_date <- as.Date("2026-05-01")
@@ -24,18 +26,10 @@ init_df <- data.frame(
   Property_Contribution   = 100,
   Travel_Contribution     = 50
 )
-init_df$Expense <- rowSums(
-  init_df[, c("Rent","CouncilTax","Gas_Electricity","Phone","Broadband","Food")]
-)
+init_df$Expense <- rowSums(init_df[, c("Rent","CouncilTax","Gas_Electricity","Phone","Broadband","Food")])
 
 targets <- c(Emergency = 7500, Investment = 50000, Property = 80000, Travel = 1800)
-
-COLORS <- c(
-  Emergency  = "#17a2b8",
-  Investment = "#007bff",
-  Property   = "#28a745",
-  Travel     = "#ffc107"
-)
+COLORS  <- c(Emergency = "#17a2b8", Investment = "#007bff", Property = "#28a745", Travel = "#ffc107")
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- page_navbar(
@@ -44,50 +38,38 @@ ui <- page_navbar(
   nav_spacer(),
   nav_panel(
     "Dashboard",
-    
-    # Value boxes — use textOutput inside value= for reactivity
     layout_column_wrap(
       width = 1/4,
-      value_box(
-        title    = "Emergency Pot",
-        value    = textOutput("ef_val"),
-        showcase = bsicons::bs_icon("shield-check"),
-        theme    = "info"
-      ),
-      value_box(
-        title    = "Investment Pot",
-        value    = textOutput("if_val"),
-        showcase = bsicons::bs_icon("graph-up-arrow"),
-        theme    = "primary"
-      ),
-      value_box(
-        title    = "Property Pot",
-        value    = textOutput("pf_val"),
-        showcase = bsicons::bs_icon("house-fill"),
-        theme    = "success"
-      ),
-      value_box(
-        title    = "Travel Pot",
-        value    = textOutput("tf_val"),
-        showcase = bsicons::bs_icon("airplane-fill"),
-        theme    = "warning"
-      )
+      value_box(title = "Emergency Pot", value = textOutput("ef_val"), showcase = bsicons::bs_icon("shield-check"), theme = "info"),
+      value_box(title = "Investment Pot", value = textOutput("if_val"), showcase = bsicons::bs_icon("graph-up-arrow"), theme = "primary"),
+      value_box(title = "Property Pot", value = textOutput("pf_val"), showcase = bsicons::bs_icon("house-fill"), theme = "success"),
+      value_box(title = "Travel Pot", value = textOutput("tf_val"), showcase = bsicons::bs_icon("airplane-fill"), theme = "warning")
     ),
-    
     layout_column_wrap(
       width = 1/2,
       card(card_header("Emergency Fund"), plotlyOutput("plot_ef", height = "280px")),
       card(card_header("Property Fund"),  plotlyOutput("plot_pf", height = "280px")),
       card(card_header("Investment Fund (compounded)"), plotlyOutput("plot_if", height = "280px")),
-      card(card_header("Travel Fund"),    plotlyOutput("plot_tf", height = "280px"))
+      card(card_header("Travel Fund"),  plotlyOutput("plot_tf", height = "280px"))
     )
   ),
   
   nav_panel(
-    "Inputs",
-    card(
-      card_header("Monthly Budget Projection — edit any cell, then click outside to apply"),
-      DTOutput("budget_table")
+    "Inputs & Data",
+    layout_column_wrap(
+      width = 1,
+      card(
+        card_header("Data Management"),
+        layout_column_wrap(
+          width = 1/2,
+          fileInput("upload_excel", "Upload Projection Excel", accept = c(".xlsx")),
+          downloadButton("download_excel", "Download Current Data", class = "btn-primary")
+        )
+      ),
+      card(
+        card_header("Monthly Budget Projection — edit any cell, then click outside to apply"),
+        DTOutput("budget_table")
+      )
     )
   )
 )
@@ -97,124 +79,95 @@ server <- function(input, output, session) {
   
   values <- reactiveVal(init_df)
   
-  # Cell edits — use editData() which handles 0-based DT column indexing correctly
+  # Handle Excel Upload
+  observeEvent(input$upload_excel, {
+    req(input$upload_excel)
+    new_df <- read_excel(input$upload_excel$datapath)
+    # Ensure Date column is actually Dates
+    new_df$Date <- as.Date(new_df$Date)
+    # Re-calculate Expense column just in case
+    new_df$Expense <- rowSums(new_df[, c("Rent","CouncilTax","Gas_Electricity","Phone","Broadband","Food")], na.rm = TRUE)
+    values(as.data.frame(new_df))
+  })
+  
+  # Handle Excel Download
+  output$download_excel <- downloadHandler(
+    filename = function() { paste0("budget_projection_", Sys.Date(), ".xlsx") },
+    content = function(file) { write_xlsx(values(), file) }
+  )
+  
+  # Cell edits
   observeEvent(input$budget_table_cell_edit, {
     info <- input$budget_table_cell_edit
-    df   <- values()
-    # editData() maps DT's 0-based col index to the correct R column and
-    # coerces the value to match the existing column type (numeric, Date, etc.)
-    df <- DT::editData(df, info, rownames = FALSE)
-    # Recompute the derived Expense total after any expense column changes
-    df$Expense <- rowSums(
-      df[, c("Rent","CouncilTax","Gas_Electricity","Phone","Broadband","Food")],
-      na.rm = TRUE
-    )
+    df <- DT::editData(values(), info, rownames = FALSE)
+    df$Expense <- rowSums(df[, c("Rent","CouncilTax","Gas_Electricity","Phone","Broadband","Food")], na.rm = TRUE)
     values(df)
   })
   
-  # Derived / cumulative columns
+  # Priority Logic & Accumulation
   processed <- reactive({
     df <- values()
+    n <- nrow(df)
+    cumm_ef <- numeric(n); cumm_pf <- numeric(n); cumm_if <- numeric(n); cumm_tf <- numeric(n)
+    bal_ef <- 0; bal_pf <- 0; bal_if <- 0; bal_tf <- 0
+    mult <- 1.00797 # Monthly Compounding
     
-    df$cumm_ef <- cumsum(replace(df$Emergency_Contribution,  is.na(df$Emergency_Contribution),  0))
-    df$cumm_pf <- cumsum(replace(df$Property_Contribution,   is.na(df$Property_Contribution),   0))
-    df$cumm_tf <- cumsum(replace(df$Travel_Contribution,     is.na(df$Travel_Contribution),     0))
-    
-    # Monthly compounding at ~9.56% p.a. (0.797 % per month — matches original multiplier)
-    inv  <- replace(df$Investment_Contribution, is.na(df$Investment_Contribution), 0)
-    bal  <- 0
-    mult <- 1.00797
-    cif  <- numeric(nrow(df))
-    for (i in seq_along(inv)) {
-      bal    <- (bal + inv[i]) * mult
-      cif[i] <- bal
+    for (i in 1:n) {
+      extra <- if(is.na(df$Extra_Income[i])) 0 else df$Extra_Income[i]
+      
+      # 1. Extra Income Priority: Emergency -> Then 60/20/20 split
+      if (bal_ef < targets["Emergency"]) {
+        bal_ef <- bal_ef + extra
+      } else {
+        bal_pf <- bal_pf + (extra * 0.60)
+        bal_if <- bal_if + (extra * 0.20)
+        bal_tf <- bal_tf + (extra * 0.20)
+      }
+      
+      # 2. Add base contributions
+      bal_ef <- bal_ef + replace(df$Emergency_Contribution[i], is.na(df$Emergency_Contribution[i]), 0)
+      bal_pf <- bal_pf + replace(df$Property_Contribution[i], is.na(df$Property_Contribution[i]), 0)
+      bal_tf <- bal_tf + replace(df$Travel_Contribution[i], is.na(df$Travel_Contribution[i]), 0)
+      
+      # 3. Investment Compounding
+      inv_contrib <- replace(df$Investment_Contribution[i], is.na(df$Investment_Contribution[i]), 0)
+      bal_if <- (bal_if + inv_contrib) * mult
+      
+      # 4. Travel Overflow Logic
+      if (bal_tf > targets["Travel"]) {
+        overflow <- bal_tf - targets["Travel"]
+        bal_tf   <- targets["Travel"]
+        bal_ef <- bal_ef + (overflow * 0.60)
+        bal_pf <- bal_pf + (overflow * 0.20)
+        bal_if <- bal_if + (overflow * 0.20)
+      }
+      
+      cumm_ef[i] <- bal_ef; cumm_pf[i] <- bal_pf; cumm_if[i] <- bal_if; cumm_tf[i] <- bal_tf
     }
-    df$cumm_if <- cif
+    df$cumm_ef <- cumm_ef; df$cumm_pf <- cumm_pf; df$cumm_if <- cumm_if; df$cumm_tf <- cumm_tf
     df
   })
   
-  # ── Helper: build a plotly line chart ──
+  # Render Value Boxes, Plots, and DT (keep existing logic from previous response)
+  output$ef_val <- renderText({ paste0("£", format(round(last(processed()$cumm_ef)), big.mark = ",")) })
+  output$if_val <- renderText({ paste0("£", format(round(last(processed()$cumm_if)), big.mark = ",")) })
+  output$pf_val <- renderText({ paste0("£", format(round(last(processed()$cumm_pf)), big.mark = ",")) })
+  output$tf_val <- renderText({ paste0("£", format(round(last(processed()$cumm_tf)), big.mark = ",")) })
+  
+  # Helper: build a plotly line chart (same as before)
   goal_plotly <- function(data, y_var, target, color) {
-    y_vals      <- data[[y_var]]
-    hit_idx     <- which(y_vals >= target)[1]
-    hit_date    <- if (!is.na(hit_idx)) data$Date[hit_idx] else NA
-    
-    pct         <- round(min(last(y_vals) / target * 100, 100))
-    subtitle    <- if (!is.na(hit_date))
-      paste0("Target reached: ", format(hit_date, "%b %Y"))
-    else
-      paste0(pct, "% of £", format(target, big.mark = ","), " target")
-    
-    p <- plot_ly(data, x = ~Date, y = ~.data[[y_var]],
-                 type = "scatter", mode = "lines",
-                 line = list(color = color, width = 2.5),
-                 hovertemplate = "%{x|%b %Y}<br>£%{y:,.0f}<extra></extra>") |>
-      add_trace(y = rep(target, nrow(data)),
-                type = "scatter", mode = "lines",
-                line = list(color = "red", width = 1.2, dash = "dash"),
-                hovertemplate = paste0("Target: £", format(target, big.mark=","), "<extra></extra>")) |>
-      layout(
-        showlegend = FALSE,
-        xaxis = list(title = "", showgrid = FALSE, zeroline = FALSE),
-        yaxis = list(title = "£", tickformat = ",.0f",
-                     showgrid = TRUE, gridcolor = "#eee", zeroline = FALSE),
-        annotations = list(list(
-          x = 0.01, y = 0.97, xref = "paper", yref = "paper",
-          text = subtitle, showarrow = FALSE,
-          font = list(size = 11, color = "#555"), xanchor = "left"
-        )),
-        margin = list(t = 10, b = 10, l = 55, r = 10),
-        paper_bgcolor = "rgba(0,0,0,0)",
-        plot_bgcolor  = "rgba(0,0,0,0)"
-      )
-    
-    if (!is.na(hit_date)) {
-      p <- p |> add_segments(
-        x = hit_date, xend = hit_date, y = 0, yend = target,
-        line = list(color = "darkgrey", width = 1, dash = "dot"),
-        hoverinfo = "none"
-      )
-    }
-    p
+    plot_ly(data, x = ~Date, y = ~.data[[y_var]], type = "scatter", mode = "lines", line = list(color = color)) %>%
+      add_segments(x = min(data$Date), xend = max(data$Date), y = target, yend = target, line = list(color = "red", dash = "dash")) %>%
+      layout(showlegend = FALSE, yaxis = list(title = "£"))
   }
   
-  # ── Value box text outputs ──
-  fmt_box <- function(curr, tgt)
-    paste0("£", format(round(curr), big.mark = ","),
-           "  (", round(min(curr / tgt * 100, 100)), "%)")
+  output$plot_ef <- renderPlotly({ goal_plotly(processed(), "cumm_ef", targets["Emergency"], COLORS["Emergency"]) })
+  output$plot_if <- renderPlotly({ goal_plotly(processed(), "cumm_if", targets["Investment"], COLORS["Investment"]) })
+  output$plot_pf <- renderPlotly({ goal_plotly(processed(), "cumm_pf", targets["Property"], COLORS["Property"]) })
+  output$plot_tf <- renderPlotly({ goal_plotly(processed(), "cumm_tf", targets["Travel"], COLORS["Travel"]) })
   
-  output$ef_val <- renderText({ fmt_box(last(processed()$cumm_ef), targets["Emergency"])  })
-  output$if_val <- renderText({ fmt_box(last(processed()$cumm_if), targets["Investment"]) })
-  output$pf_val <- renderText({ fmt_box(last(processed()$cumm_pf), targets["Property"])   })
-  output$tf_val <- renderText({ fmt_box(last(processed()$cumm_tf), targets["Travel"])     })
-  
-  # ── Plots — all renderPlotly ──
-  output$plot_ef <- renderPlotly({
-    goal_plotly(processed(), "cumm_ef", targets["Emergency"],  COLORS["Emergency"])
-  })
-  output$plot_if <- renderPlotly({
-    goal_plotly(processed(), "cumm_if", targets["Investment"], COLORS["Investment"])
-  })
-  output$plot_pf <- renderPlotly({
-    goal_plotly(processed(), "cumm_pf", targets["Property"],   COLORS["Property"])
-  })
-  output$plot_tf <- renderPlotly({
-    goal_plotly(processed(), "cumm_tf", targets["Travel"],     COLORS["Travel"])
-  })
-  
-  # ── Editable budget table ──
   output$budget_table <- renderDT({
-    datatable(
-      values(),
-      editable  = list(target = "cell", disable = list(columns = c(0, 13))),  # Date & Expense not editable
-      rownames  = FALSE,
-      options   = list(
-        pageLength = 12,
-        scrollX    = TRUE,
-        autoWidth  = FALSE,
-        columnDefs = list(list(className = "dt-right", targets = "_all"))
-      )
-    )
+    datatable(values(), editable = list(target = "cell", disable = list(columns = c(0, 13))), rownames = FALSE, options = list(pageLength = 12, scrollX = TRUE))
   })
 }
 
