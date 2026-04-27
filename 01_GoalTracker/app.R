@@ -1,8 +1,11 @@
 library(shiny)
 library(bslib)
+library(shinydashboard)
 
-ui <- fluidPage(
-  "This would be my learning stage how to build full-fledged Shiny app/dashboard"
+ui <- dashboardPage(
+  dashboardHeader(),
+  dashboardSidebar(),
+  dashboardBody()
 )
 
 server <- function(input, session, output){
