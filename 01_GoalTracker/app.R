@@ -25,7 +25,6 @@ init_df <- data.frame(
   Travel_Contribution = 50
 )
 
-# Initial Expense Calculation
 init_df$Expense <- rowSums(init_df[, c("Rent", "CouncilTax", "Gas_electricity", "Phone", "Broadband", "Food")])
 
 targets <- c(Emergency = 7500, Investment = 50000, Property = 80000, Travel = 1800)
@@ -44,17 +43,16 @@ ui <- page_navbar(
     ),
     layout_column_wrap(
       width = 1/2,
-      card(card_header("Emergency Fund Timeline"), plotOutput("plot_ef_timeline")),
-      card(card_header("Property Fund Timeline"), plotOutput("plot_pf_timeline")),
-      card(card_header("Investment Fund Timeline"), plotOutput("plot_if_timeline")),
-      card(card_header("Travel Fund Timeline"), plotOutput("plot_tf_timeline"))
+      card(card_header("Emergency Fund Progress"), plotOutput("plot_ef_timeline")),
+      card(card_header("Property Fund Progress"), plotOutput("plot_pf_timeline")),
+      card(card_header("Investment Fund Progress"), plotOutput("plot_if_timeline")),
+      card(card_header("Travel Fund Progress"), plotOutput("plot_tf_timeline"))
     )
   ),
   nav_panel(
     "Inputs",
     card(
       card_header("Monthly Budget Projection"),
-      markdown("Double-click a cell to edit. **Note:** All columns are recalculated automatically."),
       DTOutput("budget_table")
     )
   )
@@ -67,34 +65,46 @@ server <- function(input, output, session) {
     info <- input$budget_table_cell_edit
     df <- values()
     df[info$row, info$col] <- info$value
-    # Recalculate Expense column in case Rent/Food etc were changed
     df$Expense <- rowSums(df[, c("Rent", "CouncilTax", "Gas_electricity", "Phone", "Broadband", "Food")])
     values(df)
   })
   
   processed_data <- reactive({
     df <- values()
-    
-    # 1. Calculate Standard Cumulative Sums
     df$cumm_ef <- cumsum(df$Emergency_Contribution)
     df$cumm_pf <- cumsum(df$Property_Contribution)
     df$cumm_tf <- cumsum(df$Travel_Contribution)
     
-    # 2. Calculate Compounding Investment (10% Annual = 0.797% Monthly)
-    # Using a loop or Reduce for actual compounding
+    # Compounding Investment
     inv_contributions <- df$Investment_Contribution
     compounded_if <- numeric(length(inv_contributions))
     balance <- 0
     multiplier <- 1.00797
-    
     for(i in 1:length(inv_contributions)) {
       balance <- (balance + inv_contributions[i]) * multiplier
       compounded_if[i] <- balance
     }
     df$cumm_if <- compounded_if
-    
     return(df)
   })
+  
+  # Helper Function for Plotting
+  make_goal_plot <- function(data, y_var, target, title, color) {
+    # Find achievement date
+    achieve_date <- data$Date[which(data[[y_var]] >= target)[1]]
+    
+    p <- ggplot(data, aes(x = Date, y = .data[[y_var]])) +
+      geom_line(color = color, size = 1.5) +
+      geom_hline(yintercept = target, linetype = "dashed", color = "red", size = 0.8) +
+      theme_minimal(base_size = 16) + # Increased text size
+      labs(y = title, x = "Year") +
+      scale_y_continuous(labels = scales::comma_format(prefix = "£"))
+    
+    if (!is.na(achieve_date)) {
+      p <- p + geom_vline(xintercept = as.numeric(achieve_date), linetype = "dotted", color = "darkgrey", size = 1)
+    }
+    return(p)
+  }
   
   # --- Value Boxes ---
   output$ef_status <- renderUI({
@@ -117,29 +127,21 @@ server <- function(input, output, session) {
     paste0("£", format(round(curr), big.mark = ","), " (", round((curr/targets['Travel'])*100), "%)")
   })
   
-  # --- Plots (Modified to avoid 'select' errors) ---
+  # --- Plots ---
   output$plot_ef_timeline <- renderPlot({
-    ggplot(processed_data(), aes(x = Date, y = cumm_ef)) +
-      geom_line(color = "#17a2b8", size = 1.2) + theme_minimal() +
-      geom_hline(yintercept = targets['Emergency'], linetype = "dashed", color = "red")
+    make_goal_plot(processed_data(), "cumm_ef", targets['Emergency'], "Emergency", "#17a2b8")
   })
   
   output$plot_pf_timeline <- renderPlot({
-    ggplot(processed_data(), aes(x = Date, y = cumm_pf)) +
-      geom_line(color = "#28a745", size = 1.2) + theme_minimal() +
-      geom_hline(yintercept = targets['Property'], linetype = "dashed", color = "red")
+    make_goal_plot(processed_data(), "cumm_pf", targets['Property'], "Property", "#28a745")
   })
   
   output$plot_if_timeline <- renderPlot({
-    ggplot(processed_data(), aes(x = Date, y = cumm_if)) +
-      geom_line(color = "#007bff", size = 1.2) + theme_minimal() +
-      geom_hline(yintercept = targets['Investment'], linetype = "dashed", color = "red")
+    make_goal_plot(processed_data(), "cumm_if", targets['Investment'], "Investment", "#007bff")
   })
   
   output$plot_tf_timeline <- renderPlot({
-    ggplot(processed_data(), aes(x = Date, y = cumm_tf)) +
-      geom_line(color = "#ffc107", size = 1.2) + theme_minimal() +
-      geom_hline(yintercept = targets['Travel'], linetype = "dashed", color = "red")
+    make_goal_plot(processed_data(), "cumm_tf", targets['Travel'], "Travel", "#ffc107")
   })
   
   output$budget_table <- renderDT({
